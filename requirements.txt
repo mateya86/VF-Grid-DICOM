@@ -1,0 +1,6 @@
+numpy>=1.24
+pillow>=9.2
+pydicom>=3.0
+# Provides the DejaVu Sans Bold font used on the page. Not needed if the font is installed
+# on the system or DejaVuSans-Bold.ttf is placed next to vf_grid_dicom.py.
+matplotlib>=3.7
