@@ -4,8 +4,8 @@
 Type the values of a Humphrey visual-field printout into a fixed grid (24-2, 30-2 or 60-4) and save the
 page as a DICOM image.
 
-Steps: choose the test pattern, enter the subject name, eye, timepoint and data type, then fill in the
-grid. Every tested location has a fixed position on a 1000 x 1000 px page; "X" marks a missing location
+Steps: choose the test pattern, enter the subject name, eye, timepoint, data type and the study date and
+time, then fill in the grid. Every tested location has a fixed position on a 1000 x 1000 px page; "X" marks a missing location
 (for example the blind spot).
 
     python vf_grid_dicom.py
@@ -166,10 +166,15 @@ def new_uid(*parts):
     return "2.25." + str(u.int)
 
 
-def save_dicom(path, image, subject, eye, timepoint, pattern, data_type):
-    """Write the page as an 8-bit grayscale Secondary Capture image (RLE Lossless)."""
+def save_dicom(path, image, subject, eye, timepoint, pattern, data_type, study_date, study_time):
+    """Write the page as an 8-bit grayscale Secondary Capture image (RLE Lossless).
+
+    `study_date` (YYYYMMDD) and `study_time` (HHMMSS) are DICOM-format strings, as returned by
+    parse_date and parse_time; they are written to the study and content date and time.
+    """
+    if not (re.fullmatch(r"\d{8}", study_date or "") and re.fullmatch(r"\d{6}", study_time or "")):
+        raise ValueError("study_date must be YYYYMMDD and study_time must be HHMMSS")
     pixels = np.asarray(image, dtype=np.uint8)
-    now = datetime.datetime.now()
     sop_uid = new_uid()
 
     meta = FileMetaDataset()
@@ -184,8 +189,8 @@ def save_dicom(path, image, subject, eye, timepoint, pattern, data_type):
     ds.file_meta = meta
     ds.SOPClassUID = SecondaryCaptureImageStorage
     ds.SOPInstanceUID = sop_uid
-    ds.StudyDate = ds.ContentDate = now.strftime("%Y%m%d")
-    ds.StudyTime = ds.ContentTime = now.strftime("%H%M%S")
+    ds.StudyDate = ds.ContentDate = study_date
+    ds.StudyTime = ds.ContentTime = study_time
     ds.Modality = "OT"
     ds.ConversionType = "WSD"
     ds.StudyDescription = "Visual field"
@@ -226,6 +231,30 @@ def parse_cell(text):
     return "invalid", None
 
 
+def parse_date(text):
+    """'YYYY-MM-DD' -> DICOM date 'YYYYMMDD', or None if the text is not a real calendar date."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", (text or "").strip())
+    if not m:
+        return None
+    try:
+        datetime.date(*(int(g) for g in m.groups()))
+    except ValueError:
+        return None
+    return "".join(m.groups())
+
+
+def parse_time(text):
+    """'HH:MM:SS' (24-hour) -> DICOM time 'HHMMSS', or None if the text is not a valid time of day."""
+    m = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})", (text or "").strip())
+    if not m:
+        return None
+    try:
+        datetime.time(*(int(g) for g in m.groups()))
+    except ValueError:
+        return None
+    return "".join(m.groups())
+
+
 def safe_filename(text):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "subject"
 
@@ -247,6 +276,8 @@ class App:
         self.eye = tk.StringVar(value="OD")
         self.timepoint = tk.StringVar(value=TIMEPOINTS[0])
         self.data_type = tk.StringVar(value=DATA_TYPES[0])
+        self.study_date = tk.StringVar(value="")        # YYYY-MM-DD, typed by the user
+        self.study_time = tk.StringVar(value="")        # HH:MM:SS, typed by the user
         self.frame = None
         self.cell_vars = []
         self.entries = []
@@ -298,6 +329,14 @@ class App:
         self._radio_row(f, "Eye", self.eye, [(e, e) for e in EYES])
         self._radio_row(f, "Timepoint", self.timepoint, [(t, t) for t in TIMEPOINTS])
         self._radio_row(f, "Data type", self.data_type, [(d, d) for d in DATA_TYPES])
+        for label, variable, hint in (("Date", self.study_date, "YYYY-MM-DD"), ("Time", self.study_time, "HH:MM:SS (24-hour)")):
+            row = tk.Frame(f)
+            row.pack(anchor="w", pady=4)
+            tk.Label(row, text=label, width=12, anchor="w").pack(side="left")
+            field = tk.Entry(row, textvariable=variable, width=12)
+            field.pack(side="left")
+            field.bind("<Return>", lambda _e: self._details_done())
+            tk.Label(row, text=hint, fg="#777777").pack(side="left", padx=(8, 0))
         buttons = tk.Frame(f)
         buttons.pack(fill="x", pady=(14, 0))
         tk.Button(buttons, text="Back", width=12, command=self.show_pattern_step).pack(side="left")
@@ -308,6 +347,14 @@ class App:
             messagebox.showwarning("Subject name", "Enter a subject name.", parent=self.root)
             return
         self.subject.set(self.subject.get().strip())
+        if parse_date(self.study_date.get()) is None:
+            messagebox.showwarning("Date", "Enter a valid date as YYYY-MM-DD (for example 2026-01-01).", parent=self.root)
+            return
+        if parse_time(self.study_time.get()) is None:
+            messagebox.showwarning("Time", "Enter a valid time as HH:MM:SS, 24-hour (for example 12:00:00).", parent=self.root)
+            return
+        self.study_date.set(self.study_date.get().strip())
+        self.study_time.set(self.study_time.get().strip())
         self.show_grid_step()
 
     # ---- step 3: grid
@@ -471,7 +518,8 @@ class App:
             messagebox.showinfo("Saved", f"Saved:\n{path}", parent=self.root)
 
     def write_dicom(self, path, page):
-        save_dicom(path, page, self.subject.get(), self.eye.get(), self.timepoint.get(), self.pattern.get(), self.data_type.get())
+        save_dicom(path, page, self.subject.get(), self.eye.get(), self.timepoint.get(), self.pattern.get(), self.data_type.get(),
+                   parse_date(self.study_date.get()), parse_time(self.study_time.get()))
 
     def save_png_dialog(self):
         page = self._final_page()
